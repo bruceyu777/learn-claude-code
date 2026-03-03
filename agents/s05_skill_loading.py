@@ -7,25 +7,19 @@ Two-layer skill injection that avoids bloating the system prompt:
     Layer 1 (cheap): skill names in system prompt (~100 tokens/skill)
     Layer 2 (on demand): full skill body in tool_result
 
-    skills/
-      pdf/
-        SKILL.md          <-- frontmatter (name, description) + body
-      code-review/
-        SKILL.md
-
     System prompt:
     +--------------------------------------+
     | You are a coding agent.              |
     | Skills available:                    |
-    |   - pdf: Process PDF files...        |  <-- Layer 1: metadata only
-    |   - code-review: Review code...      |
+    |   - git: Git workflow helpers        |  <-- Layer 1: metadata only
+    |   - test: Testing best practices     |
     +--------------------------------------+
 
-    When model calls load_skill("pdf"):
+    When model calls load_skill("git"):
     +--------------------------------------+
     | tool_result:                         |
     | <skill>                              |
-    |   Full PDF processing instructions   |  <-- Layer 2: full body
+    |   Full git workflow instructions...  |  <-- Layer 2: full body
     |   Step 1: ...                        |
     |   Step 2: ...                        |
     | </skill>                             |
@@ -39,21 +33,14 @@ import re
 import subprocess
 from pathlib import Path
 
-from anthropic import Anthropic
-from dotenv import load_dotenv
-
-load_dotenv(override=True)
-
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+from compat import make_client
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
-SKILLS_DIR = WORKDIR / "skills"
+client, MODEL = make_client()
+SKILLS_DIR = WORKDIR / ".skills"
 
 
-# -- SkillLoader: scan skills/<name>/SKILL.md with YAML frontmatter --
+# -- SkillLoader: parse .skills/*.md files with YAML frontmatter --
 class SkillLoader:
     def __init__(self, skills_dir: Path):
         self.skills_dir = skills_dir
@@ -63,10 +50,10 @@ class SkillLoader:
     def _load_all(self):
         if not self.skills_dir.exists():
             return
-        for f in sorted(self.skills_dir.rglob("SKILL.md")):
+        for f in sorted(self.skills_dir.glob("*.md")):
+            name = f.stem
             text = f.read_text()
             meta, body = self._parse_frontmatter(text)
-            name = meta.get("name", f.parent.name)
             self.skills[name] = {"meta": meta, "body": body, "path": str(f)}
 
     def _parse_frontmatter(self, text: str) -> tuple:
@@ -217,9 +204,4 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
         print()

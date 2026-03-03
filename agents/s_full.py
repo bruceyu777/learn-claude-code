@@ -45,16 +45,10 @@ import uuid
 from pathlib import Path
 from queue import Queue
 
-from anthropic import Anthropic
-from dotenv import load_dotenv
-
-load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+from compat import make_client
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client, MODEL = make_client()
 
 TEAM_DIR = WORKDIR / ".team"
 INBOX_DIR = TEAM_DIR / "inbox"
@@ -199,7 +193,7 @@ class SkillLoader:
     def __init__(self, skills_dir: Path):
         self.skills = {}
         if skills_dir.exists():
-            for f in sorted(skills_dir.rglob("SKILL.md")):
+            for f in sorted(skills_dir.glob("*.md")):
                 text = f.read_text()
                 match = re.match(r"^---\n(.*?)\n---\n(.*)", text, re.DOTALL)
                 meta, body = {}, text
@@ -209,8 +203,7 @@ class SkillLoader:
                             k, v = line.split(":", 1)
                             meta[k.strip()] = v.strip()
                     body = match.group(2).strip()
-                name = meta.get("name", f.parent.name)
-                self.skills[name] = {"meta": meta, "body": body}
+                self.skills[f.stem] = {"meta": meta, "body": body}
 
     def descriptions(self) -> str:
         if not self.skills: return "(no skills)"
