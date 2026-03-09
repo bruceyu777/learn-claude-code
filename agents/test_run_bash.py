@@ -23,7 +23,7 @@ import importlib.util
 
 # ── Load run_bash without triggering LLM initialisation ─────────────────────
 # make_client() connects to the LLM at import time.  We stub it out so the
-# tests work with no API key / Ollama server required.
+# tests work with no API key / LLM server required.
 import compat as _compat
 _compat.make_client = lambda *a, **k: (
     types.SimpleNamespace(messages=None), "test-model", "test-harness"
