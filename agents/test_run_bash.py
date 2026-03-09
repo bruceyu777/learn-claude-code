@@ -26,13 +26,23 @@ import importlib.util
 # tests work with no API key / Ollama server required.
 import compat as _compat
 _compat.make_client = lambda *a, **k: (
-    types.SimpleNamespace(messages=None), "test-model"
+    types.SimpleNamespace(messages=None), "test-model", "test-harness"
 )
+
+# stub wrap_anthropic so it doesn't try to introspect the fake client
+try:
+    import langsmith.wrappers as _ls_wrappers
+    _ls_wrappers.wrap_anthropic = lambda c: c  # no-op: return client unchanged
+except ImportError:
+    pass
 
 _spec = importlib.util.spec_from_file_location("s01", "s01_agent_loop.py")
 _mod  = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 run_bash = _mod.run_bash
+
+from agent_logger import AgentLogger
+logger = AgentLogger("test_run_bash")  # → logs/test_run_bash.log (refreshed each run)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -40,6 +50,16 @@ VERBOSE = "-v" in sys.argv
 
 pass_count = 0
 fail_count = 0
+_section_turn = 0
+
+
+def begin_section(title: str):
+    """Log the start of a numbered test group as a loop turn."""
+    global _section_turn
+    _section_turn += 1
+    logger.loop_turn(_section_turn)
+    logger.user_input(title)
+    print(title)
 
 
 def check(label: str, command: str, *, contains: str = None, starts_with: str = None,
@@ -47,6 +67,9 @@ def check(label: str, command: str, *, contains: str = None, starts_with: str = 
     """Run command, assert result, print pass/fail."""
     global pass_count, fail_count
     result = run_bash(command)
+
+    # ── Log the bash execution so it appears in logs/test_run_bash.log ──────
+    logger.tool_execution("bash", {"command": command}, result)
 
     if VERBOSE:
         print(f"\n{'─'*60}")
@@ -65,7 +88,10 @@ def check(label: str, command: str, *, contains: str = None, starts_with: str = 
     if not_contains is not None and not_contains in result:
         ok = False; reason = f"expected {not_contains!r} NOT in output"
 
-    status = "PASS ✓" if ok else f"FAIL ✗  ({reason})"
+    verdict = "PASS ✓" if ok else f"FAIL ✗  ({reason})"
+    # ── Log pass/fail verdict so it is visible in the log file ──────────────
+    logger.final_response(f"{verdict}  [{label}]")
+
     if not VERBOSE:
         print(f"  {'PASS ✓' if ok else 'FAIL ✗':<8} {label}")
     else:
@@ -78,12 +104,14 @@ def check(label: str, command: str, *, contains: str = None, starts_with: str = 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+logger.session_start(provider="test-harness", model="run_bash")
+
 print("\n══════════════════════════════════════════════════")
 print("  run_bash() edge-case demo tests")
 print("══════════════════════════════════════════════════\n")
 
 # ── 1. Dangerous command blocklist ────────────────────────────────────────────
-print("[ 1 ] Dangerous command blocklist")
+begin_section("[ 1 ] Dangerous command blocklist")
 check("sudo blocked",         "sudo apt update",
       contains="Dangerous command blocked")
 check("rm -rf / blocked",     "rm -rf /tmp && rm -rf /",
@@ -96,7 +124,7 @@ check("device write blocked", "dd if=/dev/zero > /dev/sda",
       contains="Dangerous command blocked")
 
 # ── 2. Streaming / non-terminating blocklist ──────────────────────────────────
-print("\n[ 2 ] Streaming command blocklist")
+begin_section("\n[ 2 ] Streaming command blocklist")
 check("ping blocked",       "ping google.com",       contains="Streaming command blocked")
 check("tail -f blocked",    "tail -f /var/log/syslog", contains="Streaming command blocked")
 check("watch blocked",      "watch ls",              contains="Streaming command blocked")
@@ -107,7 +135,7 @@ check("suggestion shown",   "ping google.com",
       contains="timeout 5 ping")   # helpful alternative is suggested
 
 # ── 3. Binary / non-UTF-8 output ─────────────────────────────────────────────
-print("\n[ 3 ] Binary / non-UTF-8 output")
+begin_section("\n[ 3 ] Binary / non-UTF-8 output")
 # Use Python to write raw non-UTF-8 bytes directly to stdout
 _bin_cmd = "python3 -c \"import sys; sys.stdout.buffer.write(bytes([0x80, 0x81, 0x82, 0x83]))\""
 check("binary output caught",
@@ -118,7 +146,7 @@ check("binary includes exit code",
       contains="[exit")
 
 # ── 4. stderr vs stdout separation ────────────────────────────────────────────
-print("\n[ 4 ] stderr vs stdout separation")
+begin_section("\n[ 4 ] stderr vs stdout separation")
 check("stdout visible",
       "echo STDOUT_LINE",
       contains="STDOUT_LINE")
@@ -136,7 +164,7 @@ check("stderr label absent from clean command",
       not_contains="[stderr]")
 
 # ── 5. Empty output (silent success) ─────────────────────────────────────────
-print("\n[ 5 ] Empty output (silent success)")
+begin_section("\n[ 5 ] Empty output (silent success)")
 check("true returns (no output)",  "true",          exact="(no output)")
 check("mkdir -p silent success",
       "mkdir -p /tmp/run_bash_test_dir && rmdir /tmp/run_bash_test_dir",
@@ -146,7 +174,7 @@ check("touch silent success",
       exact="(no output)")
 
 # ── 6. Non-zero exit code ─────────────────────────────────────────────────────
-print("\n[ 6 ] Non-zero exit code")
+begin_section("\n[ 6 ] Non-zero exit code")
 check("exit code prepended",
       "ls /no_such_path_xyz_abc_99",
       starts_with="[exit ")
@@ -162,7 +190,7 @@ check("zero exit has no prefix",
       not_contains="[exit ")
 
 # ── 7. Truncation with explicit marker ────────────────────────────────────────
-print("\n[ 7 ] Output truncation with explicit marker")
+begin_section("\n[ 7 ] Output truncation with explicit marker")
 # Generate 15,000 chars (> 10,000 limit)
 check("truncation marker present",
       "python3 -c \"print('A' * 15000)\"",
@@ -178,7 +206,7 @@ check("short output NOT truncated",
       not_contains="truncated")
 
 # ── 8. Normal success (sanity check) ─────────────────────────────────────────
-print("\n[ 8 ] Normal successful commands (sanity)")
+begin_section("\n[ 8 ] Normal successful commands (sanity)")
 check("echo works",           "echo hello world",       contains="hello world")
 check("multi-line output",    "printf 'a\nb\nc'",        contains="a")
 check("python one-liner",     "python3 -c \"print(1+1)\"", contains="2")
@@ -188,8 +216,13 @@ check("exit code not in clean output",
       not_contains="[exit")
 
 # ─────────────────────────────────────────────────────────────────────────────
+summary = f"Results: {pass_count} passed, {fail_count} failed"
+logger.final_response(summary)
+logger.session_end()
+
 print(f"\n══════════════════════════════════════════════════")
-print(f"  Results: {pass_count} passed, {fail_count} failed")
+print(f"  {summary}")
+print(f"  Log: {logger.log_path}")
 print(f"══════════════════════════════════════════════════\n")
 
 if fail_count:
