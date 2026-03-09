@@ -1,11 +1,22 @@
 """
-compat.py - Anthropic/Ollama Compatibility Adapter
+compat.py - Multi-Provider LLM Compatibility Adapter
 
-Provides make_client() that returns (client, model) regardless of backend.
-When OLLAMA_BASE_URL + OLLAMA_MODEL are set, returns an OllamaCompatClient
-that mimics the Anthropic SDK interface so agent files need zero logic changes.
+Provides make_client() that returns (client, model) for any supported LLM provider.
+All agent files call make_client() without changes; the provider is selected at
+runtime via the LLM_PROVIDER environment variable (default: "ollama").
 
-API surface emulated:
+Provider selection
+------------------
+  LLM_PROVIDER=ollama     → OllamaCompatClient  (local Ollama, default)
+  LLM_PROVIDER=claude     → Anthropic SDK client
+  LLM_PROVIDER=anthropic  → alias for "claude"
+  (or pass provider= arg directly: make_client("claude"))
+
+Custom providers can be registered before calling make_client():
+  from compat import register_provider
+  register_provider("my-llm", lambda: (MyClient(), "my-model"))
+
+API surface emulated by OllamaCompatClient (same as Anthropic SDK):
     client.messages.create(model, messages, max_tokens, system=None, tools=None)
     -> response with:
         response.stop_reason  ("tool_use" | "end_turn")
@@ -289,41 +300,116 @@ class OllamaCompatClient:
 
 
 # ---------------------------------------------------------------------------
+# Provider registry & built-in factories
+# ---------------------------------------------------------------------------
+
+# Models known to lack reliable tool-calling support (Ollama)
+_NO_TOOL_MODELS = ("llama3:latest", "llama3:8b", "llama3:70b", "llama2")
+
+# Registry: provider name -> zero-arg factory returning (client, model_str)
+_PROVIDER_REGISTRY: dict = {}
+
+
+def register_provider(name: str, factory):
+    """
+    Register a custom LLM provider factory.
+
+    ``factory`` must be a callable with no required arguments that returns
+    ``(client, model_str)``.  Once registered it can be selected via the
+    ``LLM_PROVIDER`` env var or the ``provider`` argument of ``make_client()``.
+
+    Example::
+
+        from compat import register_provider, OllamaCompatClient
+
+        def my_provider():
+            client = OllamaCompatClient("http://mygpu:11434", "mistral")
+            return client, "mistral"
+
+        register_provider("mistral-local", my_provider)
+    """
+    _PROVIDER_REGISTRY[name] = factory
+
+
+def _make_ollama_client():
+    """Built-in factory: Ollama via its OpenAI-compatible endpoint."""
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    model = os.getenv("OLLAMA_MODEL", "llama3.1:latest")
+    if any(model.startswith(m) for m in _NO_TOOL_MODELS):
+        print(
+            f"[compat] WARNING: '{model}' does not support tool calling. "
+            "All sessions require tools. Recommend: ollama pull llama3.1:latest"
+        )
+    print(f"[compat] Provider=ollama  {base_url}  model={model}")
+    return OllamaCompatClient(base_url=base_url, model=model), model
+
+
+def _make_claude_client():
+    """Built-in factory: Anthropic Claude (also covers Anthropic-compatible APIs)."""
+    from anthropic import Anthropic
+    base_url = os.getenv("ANTHROPIC_BASE_URL")
+    if base_url:
+        # Some relay providers conflict with ANTHROPIC_AUTH_TOKEN
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+    client = Anthropic(base_url=base_url)
+    model = os.environ.get("MODEL_ID", "claude-sonnet-4-6")
+    print(f"[compat] Provider=claude  model={model}")
+    return client, model
+
+
+# Register built-in providers
+register_provider("ollama",     _make_ollama_client)
+register_provider("claude",     _make_claude_client)
+register_provider("anthropic",  _make_claude_client)   # alias
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-# Models known to lack tool calling support
-_NO_TOOL_MODELS = ("llama3:latest", "llama3:8b", "llama3:70b", "llama2")
-
-
-def make_client():
+def make_client(provider: str | None = None):
     """
-    Return (client, model) based on environment variables.
+    Return ``(client, model)`` for the chosen LLM provider.
 
-    Priority:
-        1. OLLAMA_BASE_URL + OLLAMA_MODEL set → OllamaCompatClient
-        2. Otherwise                           → Anthropic SDK client + MODEL_ID
+    Provider resolution order
+    -------------------------
+    1. ``provider`` argument  — explicit programmatic override
+    2. ``LLM_PROVIDER`` environment variable
+    3. Default: ``"ollama"``
 
-    Usage in agent files:
+    Built-in providers
+    ------------------
+    =========== ===============================================================
+    Name        Description / required env vars
+    =========== ===============================================================
+    ollama      Local Ollama inference (OLLAMA_BASE_URL, OLLAMA_MODEL)
+    claude      Anthropic Claude API  (ANTHROPIC_BASE_URL optional, MODEL_ID)
+    anthropic   Alias for ``claude``
+    =========== ===============================================================
+
+    Custom providers
+    ----------------
+    Register a factory before calling ``make_client()``::
+
+        from compat import register_provider
+        register_provider("my-llm", lambda: (MyClient(), "my-model"))
+
+    Usage in agent files
+    --------------------
+    ::
+
         from compat import make_client
-        client, MODEL = make_client()
+
+        client, MODEL = make_client()           # honours LLM_PROVIDER env var
+        client, MODEL = make_client("claude")   # force Claude regardless of env
     """
-    ollama_url = os.getenv("OLLAMA_BASE_URL")
-    ollama_model = os.getenv("OLLAMA_MODEL")
-
-    if ollama_url and ollama_model:
-        if any(ollama_model.startswith(m) for m in _NO_TOOL_MODELS):
-            print(
-                f"[compat] WARNING: '{ollama_model}' does not support tool calling. "
-                "All sessions require tools. Recommend: ollama pull llama3.1:latest"
-            )
-        print(f"[compat] Ollama  {ollama_url}  model={ollama_model}")
-        return OllamaCompatClient(base_url=ollama_url, model=ollama_model), ollama_model
-
-    # Standard Anthropic path (preserves existing ANTHROPIC_BASE_URL logic)
-    from anthropic import Anthropic
-    if os.getenv("ANTHROPIC_BASE_URL"):
-        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-    client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-    model = os.environ["MODEL_ID"]
-    return client, model
+    resolved = provider or os.getenv("LLM_PROVIDER", "ollama")
+    factory = _PROVIDER_REGISTRY.get(resolved)
+    if factory is None:
+        available = ", ".join(sorted(_PROVIDER_REGISTRY))
+        raise ValueError(
+            f"[compat] Unknown provider '{resolved}'. "
+            f"Available: {available}. "
+            "Register custom providers with register_provider()."
+        )
+    return factory()
