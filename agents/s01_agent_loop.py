@@ -34,7 +34,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 from compat import make_client
 from agent_logger import AgentLogger
 
-client, MODEL = make_client("claude")
+client, MODEL, PROVIDER = make_client("claude")
 
 # Wrap the Anthropic client so every messages.create() call is traced in LangSmith.
 # Requires env vars: LANGSMITH_API_KEY, LANGSMITH_TRACING=true, LANGSMITH_PROJECT
@@ -183,8 +183,7 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    provider = os.getenv("LLM_PROVIDER", "ollama")
-    logger.session_start(provider=provider, model=MODEL)
+    logger.session_start(provider=PROVIDER, model=MODEL)
     history = []
     while True:
         try:

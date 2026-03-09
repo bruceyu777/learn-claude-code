@@ -369,7 +369,7 @@ register_provider("anthropic",  _make_claude_client)   # alias
 
 def make_client(provider: str | None = None):
     """
-    Return ``(client, model)`` for the chosen LLM provider.
+    Return ``(client, model, provider_name)`` for the chosen LLM provider.
 
     Provider resolution order
     -------------------------
@@ -400,8 +400,13 @@ def make_client(provider: str | None = None):
 
         from compat import make_client
 
-        client, MODEL = make_client()           # honours LLM_PROVIDER env var
-        client, MODEL = make_client("claude")   # force Claude regardless of env
+        client, MODEL, PROVIDER = make_client()           # honours LLM_PROVIDER env var
+        client, MODEL, PROVIDER = make_client("claude")   # force Claude regardless of env
+        
+    Returns
+    -------
+    tuple
+        (client, model_string, provider_name)
     """
     resolved = provider or os.getenv("LLM_PROVIDER", "ollama")
     factory = _PROVIDER_REGISTRY.get(resolved)
@@ -412,4 +417,5 @@ def make_client(provider: str | None = None):
             f"Available: {available}. "
             "Register custom providers with register_provider()."
         )
-    return factory()
+    client, model = factory()
+    return client, model, resolved  # Return the resolved provider name
