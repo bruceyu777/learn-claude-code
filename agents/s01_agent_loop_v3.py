@@ -27,22 +27,10 @@ import os
 import readline  # noqa: F401 — enables arrow-key / history editing for input()
 import subprocess
 
-from dotenv import load_dotenv
-# Explicitly resolve .env relative to this file so it works regardless of CWD
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
-
 from compat import make_client
 from agent_logger import AgentLogger
 
 client, MODEL = make_client("claude")
-
-# Wrap the Anthropic client so every messages.create() call is traced in LangSmith.
-# Requires env vars: LANGSMITH_API_KEY, LANGSMITH_TRACING=true, LANGSMITH_PROJECT
-try:
-    from langsmith.wrappers import wrap_anthropic
-    client = wrap_anthropic(client)
-except ImportError:
-    pass  # langsmith not installed — tracing silently disabled
 logger = AgentLogger("s01_agent_loop")  # → logs/s01_agent_loop.log (refreshed each run)
 
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
